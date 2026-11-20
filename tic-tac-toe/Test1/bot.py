@@ -120,7 +120,7 @@ def _analyze(s: str, p: str):
         after = _seg_level(local[:ii] + "x" + local[ii + 1:])
         if after > NONE and after > _seg_level(local):
             levels[i] = after
-            if after >= THREE:  # Sekojam arī parastajiem trijniekiem kombinācijām
+            if after >= THREE:
                 hot.append((i, after))
     return score, tuple(levels), tuple(hot)
 
@@ -188,18 +188,9 @@ class _BoardState:
         self.hash ^= ZOBRIST[r][c][PIDX[p]]
 
     def evaluate(self, k: int) -> int:
-        # Neliels iniciatīvas (tempo) bonuss aktīvajam spēlētājam
         return self.score[k] - self.score[1 - k] + 45
 
     def threats(self, k: int):
-        """
-        Atgriež:
-          wins   - 5 pēc kārtas (tūlītēja uzvara)
-          strong - OPEN4 vai dubultais FOUR (uzvara nākamajā gājienā, ja pretiniekam nav FIVE)
-          forks  - dubultais OPEN3 (3x3 dakša) vai FOUR + OPEN3 (4x3 dakša)
-          fours  - parastie FOUR
-          threes - parastie OPEN3
-        """
         wins, strong, forks, fours, threes = set(), set(), set(), set(), set()
         four_cnt = {}
         open3_cnt = {}
@@ -226,11 +217,11 @@ class _BoardState:
             if cnt >= 2:
                 strong.add(cell)
             elif cnt == 1 and open3_cnt.get(cell, 0) >= 1:
-                strong.add(cell)  # 4x3 kombinācija arī ir piespiedu uzvara!
+                strong.add(cell)
 
         for cell, cnt in open3_cnt.items():
             if cnt >= 2:
-                forks.add(cell)  # 3x3 dakša!
+                forks.add(cell)
 
         return wins, strong, forks, fours, threes
 
@@ -256,7 +247,6 @@ class _BoardState:
                 def_o3 += 1
 
         v = att + (dfn * 9) // 10
-        # Augsta prioritāte 4x3 un 3x3 dakšām (gan uzbrukumā, gan bloķējot)
         if att_four >= 2 or (att_four >= 1 and att_o3 >= 1):
             v += 200_000
         elif att_o3 >= 2:
@@ -313,22 +303,18 @@ class _Engine:
         if len(wins_o) >= 2:
             return -(WIN - 1), [next(iter(wins_o))]
         if wins_o:
-            return None, [next(iter(wins_o))]  # Obligāts vienīgais bloks
+            return None, [next(iter(wins_o))]
 
-        # Droša uzvara ar OPEN4 / 4x3 (pretiniekam nav FIVE, jo tikko pārbaudījām wins_o)
         if strong_p:
             return WIN - 2, g.order(strong_p, k)
 
-        # Ja pretiniekam ir OPEN4 vai 4x3 drauds, varam glābties tikai ar saviem FOUR vai bloķējot
         if strong_o:
             pool = strong_o | fours_p | fours_o
             return None, g.order(pool, k)
 
-        # Ja pašam ir 3x3 dakša un pretiniekam nav tūlītēju četrinieku
         if forks_p and not fours_o:
             return None, g.order(forks_p | fours_p, k)
 
-        # Pretinieka 3x3 dakša vai OPEN3 — apskatām blokus, pretinieka četrinieku punktus un savus četriniekus
         if forks_o or threes_o:
             pool = forks_o | threes_o | fours_o | fours_p
             return None, g.order(pool, k)
@@ -371,7 +357,6 @@ class _Engine:
         if not moves:
             return 0
 
-        # Ieliekam transpozīciju tabulas labāko gājienu saraksta pašā sākumā
         if tt_move is not None and tt_move in moves:
             moves.remove(tt_move)
             moves.insert(0, tt_move)
@@ -383,11 +368,14 @@ class _Engine:
 
         for idx, (r, c) in enumerate(moves):
             g.place(r, c, p)
-            # Principal Variation Search (PVS) paātrina Alpha-Beta par ~25%
             if idx == 0:
                 val = -self.negamax(opp, next_depth, -beta, -alpha, ply + 1)
             else:
-                val = -self.negamax(opp, next_depth, -alpha - 1, -alpha, ply + 1)
+                # LMR (Late Move Reductions): tālākos gājienus meklējam par 1 līmeni seklāk
+                reduction = 1 if (idx >= 4 and next_depth >= 2 and not forced) else 0
+                val = -self.negamax(opp, next_depth - reduction, -alpha - 1, -alpha, ply + 1)
+                if reduction > 0 and val > alpha:
+                    val = -self.negamax(opp, next_depth, -alpha - 1, -alpha, ply + 1)
                 if alpha < val < beta:
                     val = -self.negamax(opp, next_depth, -beta, -alpha, ply + 1)
             g.undo(r, c, p)
@@ -441,7 +429,7 @@ def _fallback_empty(board) -> tuple[int, int]:
     return (7, 7)
 
 
-def _solve(board, player: str, budget: float):
+def _solve(board, player: str, budget: float, max_depth: int = 22):
     deadline = time.perf_counter() + budget
     g = _BoardState(board)
     if g.stones == 0:
@@ -461,7 +449,7 @@ def _solve(board, player: str, budget: float):
     best_mv = moves[0]
     best_val = g.evaluate(k)
 
-    for depth in range(1, 22):
+    for depth in range(1, max_depth + 1):
         try:
             val, mv = engine.search_root(moves, player, depth)
         except _Timeout:
@@ -494,9 +482,9 @@ SWAP2_OPENINGS = (
     [(7, 7, X), (6, 8, O), (8, 9, X)],
     # 2. Asimetriskais trijstūris (Taraguchi tipa sākums)
     [(7, 7, X), (7, 8, O), (9, 6, X)],
-    # 3. Plašā centra kontrole (grūti izveidot tūlītēju 3x3 dakšu)
+    # 3. Plašā centra kontrole
     [(7, 7, X), (6, 6, O), (8, 9, X)],
-    # 4. Zirga gājiena nobīde (klasisks līdzsvarots Renju/Swap2 variants)
+    # 4. Zirga gājiena nobīde
     [(7, 7, X), (8, 6, O), (6, 9, X)],
     # 5. Pretdiagonāles balanss
     [(7, 7, X), (6, 7, O), (8, 9, X)],
@@ -504,7 +492,6 @@ SWAP2_OPENINGS = (
 
 
 def swap2_propose(board: list[list[str]]) -> list[tuple[int, int, str]]:
-    # Izvēlamies vienu no 5 līdzsvarotajām atklātnēm un gadījuma pagriezienu/atspoguļojumu
     opening = random.choice(SWAP2_OPENINGS)
     flip_r = random.choice((False, True))
     flip_c = random.choice((False, True))
@@ -522,27 +509,28 @@ def swap2_propose(board: list[list[str]]) -> list[tuple[int, int, str]]:
 
 def swap2_respond(board: list[list[str]]) -> dict:
     # Novērtējam pozīciju no 'O' skatpunkta (jo 'O' veic 4. gājienu)
-    _, val_o = _solve(board, O, TIME_LIMIT * 0.65)
-    if val_o > 120:
+    _, val_o = _solve(board, O, TIME_LIMIT * 0.45)
+    if val_o > 110:
         return {"action": "TAKE_O"}
-    if val_o < -120:
+    if val_o < -110:
         return {"action": "TAKE_X"}
 
-    # Ja pozīcija ir tuvu neitrālai, meklējam labāko PLACE_TWO balansu
+    # Ja pozīcija ir tuvu neitrālai, meklējam labāko PLACE_TWO balansu ar 2-gājienu pārbaudi
     g = _BoardState(board)
-    cands = g.candidates(PIDX[O], 8)
+    cands = g.candidates(PIDX[O], 6)
     best_pair = None
     best_margin = abs(val_o)
 
-    for i in range(min(len(cands), 5)):
+    for i in range(min(len(cands), 4)):
         r1, c1 = cands[i]
         g.place(r1, c1, X)
-        for j in range(min(len(cands), 5)):
+        for j in range(min(len(cands), 4)):
             if i == j:
                 continue
             r2, c2 = cands[j]
             g.place(r2, c2, O)
-            margin = abs(g.evaluate(PIDX[O]))
+            _, pair_val = _solve(g.cells, O, 0.03, max_depth=3)
+            margin = abs(pair_val)
             if margin < best_margin:
                 best_margin = margin
                 best_pair = [(r1, c1, X), (r2, c2, O)]
