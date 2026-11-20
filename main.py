@@ -105,13 +105,15 @@ def validate_moves_list(board: list[list[str]], moves, expected_symbols: list[st
     return sorted(symbols) == sorted(expected_symbols)
 
 
-def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
+def play_match(p1: dict, p2: dict, on_board=None, on_assignment=None, on_timing=None) -> tuple[str, str]:
     """
     Izspēlē vienu pilnu partiju (Swap2 atklātne + pamatspēle).
     p1 = 1. spēlētājs (izliek pirmās 3 figūras), p2 = 2. spēlētājs.
     Atgriež: (uzvarētāja_id vai 'DRAW', apraksts)
     """
     board = create_board()
+    swap_cells = set()
+    returned_cells = set()
 
     # === 1. SOLIS: Swap2 — 1. spēlētājs uzliek 2x 'X' un 1x 'O' ===
     try:
@@ -126,8 +128,9 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
 
     for r, c, sym in opening_moves:
         board[r][c] = sym
+        swap_cells.add((r, c))
     if on_board:
-        on_board(copy.deepcopy(board))
+        on_board(copy.deepcopy(board), swap_cells, returned_cells)
 
     # === 2. SOLIS: Swap2 — 2. spēlētājs izvēlas darbību ===
     try:
@@ -154,8 +157,10 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
             return p1["id"], f"{p2['name']} nelegāli papildgājieni (PLACE_TWO)"
         for r, c, sym in extra_moves:
             board[r][c] = sym
+            swap_cells.add((r, c))
+            returned_cells.add((r, c))
         if on_board:
-            on_board(copy.deepcopy(board))
+            on_board(copy.deepcopy(board), swap_cells, returned_cells)
 
         # === 3. SOLIS: 1. spēlētājs izvēlas galīgo krāsu ===
         try:
@@ -174,6 +179,9 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
     else:
         return p1["id"], f"{p2['name']} nezināma Swap2 darbība: {action}"
 
+    if on_assignment:
+        on_assignment(bot_x, bot_o)
+
     # === 4. SOLIS: Pamatspēli sāk 'O' (4. vai 6. gājiens). ===
     placed_count = sum(cell != "_" for row in board for cell in row)
     turn_order = [("O", bot_o), ("X", bot_x)]
@@ -182,11 +190,21 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
         symbol, current_bot = turn_order[step % 2]
         opponent_bot = turn_order[(step + 1) % 2][1]
 
+        started = time.perf_counter()
         try:
             move = run_with_timeout(current_bot["get_move"], board, symbol)
+            elapsed = time.perf_counter() - started
+            if on_timing:
+                on_timing(current_bot["id"], elapsed)
         except TimeoutError:
+            elapsed = time.perf_counter() - started
+            if on_timing:
+                on_timing(current_bot["id"], elapsed)
             return opponent_bot["id"], f"{current_bot['name']} pārsniedza laiku ({MOVE_TIMEOUT}s)"
         except Exception as e:
+            elapsed = time.perf_counter() - started
+            if on_timing:
+                on_timing(current_bot["id"], elapsed)
             return opponent_bot["id"], f"{current_bot['name']} kļūda kodā: {e}"
 
         if not isinstance(move, (tuple, list)) or len(move) != 2:
@@ -199,7 +217,7 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
         board[r][c] = symbol
         total_moves = placed_count + step + 1
         if on_board:
-            on_board(copy.deepcopy(board))
+            on_board(copy.deepcopy(board), swap_cells, returned_cells)
 
         if check_winner(board, r, c, symbol):
             return current_bot["id"], f"5 rindā ({symbol}, {total_moves}. gājienā)"
@@ -309,6 +327,7 @@ class TournamentGUI:
         self.recent_boards = []
         self.recent_results = []
         self.current_board = create_board()
+        self.timing = {}
 
         self._build_layout()
 
@@ -329,9 +348,21 @@ class TournamentGUI:
         tk.Spinbox(top, from_=1, to=20, textvariable=self.games_var, width=4).pack(side="left")
 
         tk.Label(top, text="Gājiena pauze:", bg="#eef1f5").pack(side="left", padx=(12, 4))
-        self.delay_var = tk.DoubleVar(value=0.15)
-        tk.Spinbox(top, from_=0.0, to=2.0, increment=0.05,
+        self.delay_var = tk.DoubleVar(value=0.03)
+        tk.Spinbox(top, from_=0.0, to=2.0, increment=0.01,
                    textvariable=self.delay_var, width=5).pack(side="left")
+        tk.Label(top, text="sek.", bg="#eef1f5").pack(side="left", padx=4)
+
+        tk.Label(top, text="Pauze starp spēlēm:", bg="#eef1f5").pack(side="left", padx=(12, 4))
+        self.match_delay_var = tk.StringVar(value="0.6")
+        match_delays = [f"{value / 5:.1f}" for value in range(0, 26)]
+        ttk.Combobox(
+            top,
+            textvariable=self.match_delay_var,
+            values=match_delays,
+            state="readonly",
+            width=6,
+        ).pack(side="left")
         tk.Label(top, text="sek.", bg="#eef1f5").pack(side="left", padx=4)
 
         body = tk.Frame(self.root, bg="#eef1f5")
@@ -341,10 +372,20 @@ class TournamentGUI:
         left.pack(side="left", fill="y", padx=(0, 8))
         tk.Label(left, text="Dalībnieki", font=("Segoe UI", 12, "bold"),
                  bg="white").pack(anchor="w", padx=10, pady=(8, 4))
-        self.participant_list = tk.Listbox(left, font=("Segoe UI", 10), relief="flat")
-        self.participant_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.participant_vars = {}
+        participant_frame = tk.Frame(left, bg="white")
+        participant_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         for bot in self.bots:
-            self.participant_list.insert("end", f"{bot['name']} ({bot['id']})")
+            var = tk.BooleanVar(value=True)
+            self.participant_vars[bot["id"]] = var
+            tk.Checkbutton(
+                participant_frame,
+                text=f"{bot['name']} ({bot['id']})",
+                variable=var,
+                bg="white",
+                anchor="w",
+                font=("Segoe UI", 10),
+            ).pack(fill="x", pady=2)
 
         center = tk.Frame(body, bg="#eef1f5")
         center.pack(side="left", fill="both", expand=True)
@@ -365,11 +406,11 @@ class TournamentGUI:
         tk.Label(standings_tab, text="Turnīra tabula", font=("Segoe UI", 11, "bold"),
                  bg="white").pack(anchor="w", padx=4, pady=(6, 2))
 
-        columns = ("vieta", "bots", "pkt", "s", "u", "n", "z")
+        columns = ("vieta", "bots", "pkt", "s", "u", "n", "z", "time")
         self.standings = ttk.Treeview(standings_tab, columns=columns,
                                       show="headings", height=8)
-        headings = ("V.", "Dalībnieks", "Pkt", "S", "U", "N", "Z")
-        widths = (38, 150, 48, 38, 38, 38, 38)
+        headings = ("V.", "Dalībnieks", "Pkt", "S", "U", "N", "Z", "Laiks")
+        widths = (38, 150, 48, 38, 38, 38, 38, 75)
         for column, heading, width in zip(columns, headings, widths):
             self.standings.heading(column, text=heading)
             self.standings.column(column, width=width, anchor="center")
@@ -380,9 +421,19 @@ class TournamentGUI:
         tk.Label(archive_tab, text="Spēļu arhīvs", font=("Segoe UI", 11, "bold"),
                  bg="white").pack(anchor="w", padx=4, pady=(6, 2))
 
-        self.archive_list = tk.Listbox(archive_tab, font=("Segoe UI", 9),
-                                       relief="flat")
-        self.archive_list.pack(fill="both", expand=True, padx=4, pady=4)
+        archive_columns = ("nr", "p1", "p2", "p1_time", "p2_time", "result", "move")
+        self.archive_table = ttk.Treeview(
+            archive_tab,
+            columns=archive_columns,
+            show="headings",
+            height=10,
+        )
+        archive_headings = ("Nr.", "Pirmais", "Otrais", "Laiks 1", "Laiks 2", "Rez.", "Gājiens")
+        archive_widths = (38, 100, 100, 58, 58, 58, 58)
+        for column, heading, width in zip(archive_columns, archive_headings, archive_widths):
+            self.archive_table.heading(column, text=heading)
+            self.archive_table.column(column, width=width, anchor="center")
+        self.archive_table.pack(fill="both", expand=True, padx=4, pady=4)
 
         bottom = tk.Frame(self.root, bg="#eef1f5")
         bottom.pack(fill="x", padx=10, pady=8)
@@ -399,12 +450,15 @@ class TournamentGUI:
             self.root.after_cancel(self._resize_job)
         self._resize_job = self.root.after(150, self.draw_recent)
 
-    def draw_board(self, board):
+    def draw_board(self, board, special_cells=None, returned_cells=None):
         canvas = self.board_canvas
         canvas.delete("all")
         size = 510
         margin = 15
         cell = (size - 2 * margin) / BOARD_SIZE
+
+        special_cells = special_cells or set()
+        returned_cells = returned_cells or set()
 
         for i in range(BOARD_SIZE + 1):
             pos = margin + i * cell
@@ -413,6 +467,15 @@ class TournamentGUI:
 
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
+                if (r, c) in special_cells:
+                    left = margin + c * cell
+                    top = margin + r * cell
+                    fill = "#947a51" if (r, c) in returned_cells else "#b9a06f"
+                    canvas.create_rectangle(
+                        left, top, left + cell, top + cell,
+                        fill=fill,
+                        outline="#8d663b",
+                    )
                 value = board[r][c]
                 if value == "_":
                     continue
@@ -435,9 +498,23 @@ class TournamentGUI:
 
         card_size = min(220, max(150, available_width // len(recent) - 10))
 
-        for board, title in recent:
+        for board, title, result, winner_name, p1_times, p2_times in recent:
             frame = tk.Frame(self.recent_frame, bg="white", bd=1, relief="solid")
             frame.pack(side="left", fill="both", expand=True, padx=5)
+            tk.Label(
+                frame,
+                text=result,
+                bg="white",
+                fg="#202124",
+                font=("Segoe UI", 20, "bold"),
+            ).pack(pady=(4, 2))
+            tk.Label(
+                frame,
+                text=winner_name,
+                bg="white",
+                fg="#2f6fed",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(pady=(0, 2))
             canvas = tk.Canvas(frame, width=card_size, height=card_size,
                                bg="#d9aa63", highlightthickness=0)
             canvas.pack()
@@ -458,18 +535,31 @@ class TournamentGUI:
                         font_size = max(4, int(cell * 0.58))
                         canvas.create_text(cx, cy, text=value, fill=color,
                                            font=("Segoe UI", font_size, "bold"))
-            tk.Label(frame, text=title, bg="white", font=("Segoe UI", 8)).pack()
-
+            tk.Label(
+                frame,
+                text=(
+                    f"{p1_times['name']}: {p1_times['total']:.2f}s | "
+                    f"{p2_times['name']}: {p2_times['total']:.2f}s"
+                ),
+                bg="white",
+                font=("Segoe UI", 8),
+            ).pack(pady=(2, 0))
     def start(self):
         if self.running:
             return
-        if len(self.bots) < 2:
+        selected_bots = [
+            bot for bot in self.bots
+            if self.participant_vars[bot["id"]].get()
+        ]
+        if len(selected_bots) < 2:
             self.status_var.set("Turnīram nepieciešami vismaz 2 boti")
             return
 
         self.running = True
+        self.active_bots = selected_bots
         self.archive.clear()
-        self.archive_list.delete(0, "end")
+        for item in self.archive_table.get_children():
+            self.archive_table.delete(item)
         self.recent_boards.clear()
         self.recent_results.clear()
         self.draw_recent()
@@ -478,7 +568,11 @@ class TournamentGUI:
                 "label": f"{bot['name']} ({bot['id']})",
                 "pts": 0.0, "w": 0, "d": 0, "l": 0, "err": 0
             }
-            for bot in self.bots
+            for bot in selected_bots
+        }
+        self.timing = {
+            bot["id"]: {"total": 0.0, "moves": 0}
+            for bot in selected_bots
         }
         self.refresh_standings()
         threading.Thread(target=self.run_thread, daemon=True).start()
@@ -487,19 +581,39 @@ class TournamentGUI:
         self.running = False
         self.status_var.set("Turnīra apturēšana...")
 
-    def board_callback(self, board):
+    def board_callback(self, board, swap_cells=None, returned_cells=None):
         self.current_board = copy.deepcopy(board)
-        self.root.after(0, lambda: self.draw_board(board))
+        special_cells = set(swap_cells or ())
+        returned = set(returned_cells or ())
+        self.root.after(
+            0,
+            lambda: self.draw_board(board, special_cells, returned),
+        )
         delay = max(0.0, float(self.delay_var.get()))
         time.sleep(delay)
 
+    def assignment_callback(self, bot_x, bot_o):
+        self.root.after(
+            0,
+            lambda: self.status_var.set(
+                f"Spēlē: {bot_x['name']} (X) vs {bot_o['name']} (O)"
+            ),
+        )
+
+    def timing_callback(self, bot_id, elapsed):
+        if bot_id not in self.timing:
+            self.timing[bot_id] = {"total": 0.0, "moves": 0}
+        self.timing[bot_id]["total"] += elapsed
+        self.timing[bot_id]["moves"] += 1
+
     def run_thread(self):
+        bots = self.active_bots
         games_per_pair = max(1, int(self.games_var.get()))
-        total_matches = len(self.bots) * (len(self.bots) - 1) * games_per_pair
+        total_matches = len(bots) * (len(bots) - 1) * games_per_pair
         match_num = 0
 
-        for i in range(len(self.bots)):
-            for j in range(len(self.bots)):
+        for i in range(len(bots)):
+            for j in range(len(bots)):
                 if i == j:
                     continue
                 for game in range(games_per_pair):
@@ -508,23 +622,36 @@ class TournamentGUI:
                         return
 
                     match_num += 1
-                    p1 = self.bots[i] if game % 2 == 0 else self.bots[j]
-                    p2 = self.bots[j] if game % 2 == 0 else self.bots[i]
+                    p1 = bots[i] if game % 2 == 0 else bots[j]
+                    p2 = bots[j] if game % 2 == 0 else bots[i]
                     self.current_board = create_board()
                     self.root.after(0, lambda: self.draw_board(create_board()))
                     self.root.after(0, lambda p1=p1, p2=p2, n=match_num:
                                     self.status_var.set(
                                         f"{n}/{total_matches}: {p1['name']} vs {p2['name']}"))
 
-                    winner_id, reason = play_match(p1, p2, self.board_callback)
+                    timing_before = {
+                        bot_id: values.copy()
+                        for bot_id, values in self.timing.items()
+                    }
+                    winner_id, reason = play_match(
+                        p1,
+                        p2,
+                        self.board_callback,
+                        self.assignment_callback,
+                        self.timing_callback,
+                    )
                     if winner_id == "DRAW":
                         self.stats[p1["id"]]["pts"] += 0.5
                         self.stats[p2["id"]]["pts"] += 0.5
                         self.stats[p1["id"]]["d"] += 1
                         self.stats[p2["id"]]["d"] += 1
                         score = "1/2-1/2"
+                        history_score = "½-½"
+                        winner_name = "Neizšķirts"
                         move_match = re.search(r"(\d+)\. gājienā", reason)
                         end_info = f"; {move_match.group(1)}. gājiens" if move_match else ""
+                        move_text = move_match.group(1) if move_match else ""
                     else:
                         loser_id = p2["id"] if winner_id == p1["id"] else p1["id"]
                         self.stats[winner_id]["pts"] += 1.0
@@ -532,22 +659,64 @@ class TournamentGUI:
                         self.stats[loser_id]["l"] += 1
                         if "5 rindā" not in reason:
                             self.stats[loser_id]["err"] += 1
-                        score = "1:0" if winner_id == p1["id"] else "0:1"
+                        score = "1-0" if winner_id == p1["id"] else "0-1"
+                        history_score = score
+                        winner_name = p1["name"] if winner_id == p1["id"] else p2["name"]
                         move_match = re.search(r"(\d+)\. gājienā", reason)
                         end_info = f"; {move_match.group(1)}. gājiens" if move_match else ""
+                        move_text = move_match.group(1) if move_match else ""
 
-                    archive_text = (
-                        f"{match_num}. {p1['name']} vs {p2['name']} — "
-                        f"{score}{end_info}"
+                    self.archive.append(
+                        (match_num, p1["name"], p2["name"], score, move_text)
                     )
-                    self.archive.append(archive_text)
                     final_board = copy.deepcopy(self.current_board)
-                    self.recent_boards.append((final_board, f"{match_num}. {p1['name']} – {p2['name']}"))
-                    self.root.after(0, lambda text=archive_text:
-                                    self.archive_list.insert("end", text))
-                    self.root.after(0, lambda: self.archive_list.see("end"))
+                    p1_match_total = (
+                        self.timing[p1["id"]]["total"]
+                        - timing_before[p1["id"]]["total"]
+                    )
+                    p2_match_total = (
+                        self.timing[p2["id"]]["total"]
+                        - timing_before[p2["id"]]["total"]
+                    )
+                    self.recent_boards.append(
+                        (
+                            final_board,
+                            f"{match_num}. {p1['name']} – {p2['name']}",
+                            history_score,
+                            winner_name,
+                            {
+                                "name": p1["name"],
+                                "total": p1_match_total,
+                            },
+                            {
+                                "name": p2["name"],
+                                "total": p2_match_total,
+                            },
+                        )
+                    )
+                    self.root.after(
+                        0,
+                        lambda nr=match_num, p1_name=p1["name"], p2_name=p2["name"],
+                        p1_time=p1_match_total, p2_time=p2_match_total,
+                        result=score, move=move_text:
+                        self.archive_table.insert(
+                            "", "end",
+                            values=(
+                                nr,
+                                p1_name,
+                                p2_name,
+                                f"{p1_time:.2f}s",
+                                f"{p2_time:.2f}s",
+                                result,
+                                move,
+                            ),
+                        ),
+                    )
+                    self.root.after(0, lambda: self.archive_table.yview_moveto(1))
                     self.root.after(0, self.refresh_standings)
                     self.root.after(0, self.draw_recent)
+                    if self.running:
+                        time.sleep(max(0.0, float(self.match_delay_var.get())))
 
         self.running = False
         self.root.after(0, lambda: self.status_var.set("Turnīrs pabeigts"))
@@ -561,9 +730,16 @@ class TournamentGUI:
                          reverse=True)
         for place, row in enumerate(ranking, start=1):
             games = row["w"] + row["d"] + row["l"]
+            bot_id = next(
+                bot_id
+                for bot_id, stats in self.stats.items()
+                if stats is row
+            )
+            timing = self.timing[bot_id]
+            time_text = f"{timing['total']:.2f}s"
             self.standings.insert("", "end", values=(
                 place, row["label"], f"{row['pts']:.1f}",
-                games, row["w"], row["d"], row["l"]
+                games, row["w"], row["d"], row["l"], time_text
             ))
 
 
