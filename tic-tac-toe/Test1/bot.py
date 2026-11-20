@@ -2,7 +2,7 @@ import random
 import time
 from functools import lru_cache
 
-BOT_NAME = "GrandmasterAI"
+BOT_NAME = "GrandmasterAI v2"
 N = 15
 EMPTY, X, O = "_", "X", "O"
 OTHER = {X: O, O: X}
