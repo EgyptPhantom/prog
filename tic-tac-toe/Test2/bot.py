@@ -1,4 +1,4 @@
-BOT_NAME = "GreedyAI Test2"
+BOT_NAME = "GreedyAI 2"
 
 BOARD_SIZE = 15
 
