@@ -476,11 +476,11 @@ def _o_is_better(board):
 
 def swap2_propose(board):
     """
-    Swap2 1. solis. X akmeņi ir zirdziņa gājienā, O starp tiem. Vienkāršs
-    novērtējums šo pozīciju uzskata par labu O, bet meklēšana rāda, ka X ir
-    stiprāks, tāpēc pretinieks bieži ņem O un mums atstāj X.
+    Swap2 1. solis. O centrā, X abās pusēs pa diagonāli. Izskatās, ka O ir
+    nobloķējis X, tāpēc pretinieki parasti ņem O, bet X ar diviem akmeņiem
+    un brīvām līnijām apkārt ir stiprāks (testos pret Peteri 4 no 4).
     """
-    return [(7, 7, X), (8, 8, O), (6, 9, X)]
+    return [(6, 6, X), (7, 7, O), (8, 8, X)]
 
 
 def swap2_respond(board):
