@@ -71,6 +71,7 @@ def load_bots(pattern: str) -> list[dict]:
                 "swap2_propose": module.swap2_propose,
                 "swap2_respond": module.swap2_respond,
                 "swap2_final_choice": module.swap2_final_choice,
+                "record_result": getattr(module, "record_result", None),
             })
         except Exception as e:
             print(f"[IELĀDES KĻŪDA] {file_str}: {e}")
@@ -113,16 +114,26 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
     """
     board = create_board()
 
+    def finish(winner_id: str, reason: str) -> tuple[str, str]:
+        for participant in (p1, p2):
+            callback = participant.get("record_result")
+            if callable(callback):
+                outcome = "draw" if winner_id == "DRAW" else (
+                    "win" if participant["id"] == winner_id else "loss"
+                )
+                callback(outcome)
+        return winner_id, reason
+
     # === 1. SOLIS: Swap2 — 1. spēlētājs uzliek 2x 'X' un 1x 'O' ===
     try:
         opening_moves = run_with_timeout(p1["swap2_propose"], board)
     except TimeoutError:
-        return p2["id"], f"{p1['name']} pārsniedza laiku (swap2_propose)"
+        return finish(p2["id"], f"{p1['name']} pārsniedza laiku (swap2_propose)")
     except Exception as e:
-        return p2["id"], f"{p1['name']} kļūda swap2_propose: {e}"
+        return finish(p2["id"], f"{p1['name']} kļūda swap2_propose: {e}")
 
     if not validate_moves_list(board, opening_moves, ["X", "X", "O"]):
-        return p2["id"], f"{p1['name']} nelegāls sākuma izvietojums: {opening_moves}"
+        return finish(p2["id"], f"{p1['name']} nelegāls sākuma izvietojums: {opening_moves}")
 
     for r, c, sym in opening_moves:
         board[r][c] = sym
@@ -133,12 +144,12 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
     try:
         response = run_with_timeout(p2["swap2_respond"], board)
     except TimeoutError:
-        return p1["id"], f"{p2['name']} pārsniedza laiku (swap2_respond)"
+        return finish(p1["id"], f"{p2['name']} pārsniedza laiku (swap2_respond)")
     except Exception as e:
-        return p1["id"], f"{p2['name']} kļūda swap2_respond: {e}"
+        return finish(p1["id"], f"{p2['name']} kļūda swap2_respond: {e}")
 
     if not isinstance(response, dict) or "action" not in response:
-        return p1["id"], f"{p2['name']} atgrieza nederīgu Swap2 atbildi"
+        return finish(p1["id"], f"{p2['name']} atgrieza nederīgu Swap2 atbildi")
 
     action = response["action"]
     bot_x = None
@@ -151,7 +162,7 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
     elif action == "PLACE_TWO":
         extra_moves = response.get("moves")
         if not validate_moves_list(board, extra_moves, ["X", "O"]):
-            return p1["id"], f"{p2['name']} nelegāli papildgājieni (PLACE_TWO)"
+            return finish(p1["id"], f"{p2['name']} nelegāli papildgājieni (PLACE_TWO)")
         for r, c, sym in extra_moves:
             board[r][c] = sym
         if on_board:
@@ -161,18 +172,18 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
         try:
             final_sym = run_with_timeout(p1["swap2_final_choice"], board)
         except TimeoutError:
-            return p2["id"], f"{p1['name']} pārsniedza laiku (swap2_final_choice)"
+            return finish(p2["id"], f"{p1['name']} pārsniedza laiku (swap2_final_choice)")
         except Exception as e:
-            return p2["id"], f"{p1['name']} kļūda swap2_final_choice: {e}"
+            return finish(p2["id"], f"{p1['name']} kļūda swap2_final_choice: {e}")
 
         if final_sym == "X":
             bot_x, bot_o = p1, p2
         elif final_sym == "O":
             bot_x, bot_o = p2, p1
         else:
-            return p2["id"], f"{p1['name']} nederīga krāsas izvēle: {final_sym}"
+            return finish(p2["id"], f"{p1['name']} nederīga krāsas izvēle: {final_sym}")
     else:
-        return p1["id"], f"{p2['name']} nezināma Swap2 darbība: {action}"
+        return finish(p1["id"], f"{p2['name']} nezināma Swap2 darbība: {action}")
 
     # === 4. SOLIS: Pamatspēli sāk 'O' (4. vai 6. gājiens). ===
     placed_count = sum(cell != "_" for row in board for cell in row)
@@ -185,16 +196,16 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
         try:
             move = run_with_timeout(current_bot["get_move"], board, symbol)
         except TimeoutError:
-            return opponent_bot["id"], f"{current_bot['name']} pārsniedza laiku ({MOVE_TIMEOUT}s)"
+            return finish(opponent_bot["id"], f"{current_bot['name']} pārsniedza laiku ({MOVE_TIMEOUT}s)")
         except Exception as e:
-            return opponent_bot["id"], f"{current_bot['name']} kļūda kodā: {e}"
+            return finish(opponent_bot["id"], f"{current_bot['name']} kļūda kodā: {e}")
 
         if not isinstance(move, (tuple, list)) or len(move) != 2:
-            return opponent_bot["id"], f"{current_bot['name']} nederīgs gājiena formāts: {move}"
+            return finish(opponent_bot["id"], f"{current_bot['name']} nederīgs gājiena formāts: {move}")
 
         r, c = move
         if not is_valid_coord(r, c) or board[r][c] != "_":
-            return opponent_bot["id"], f"{current_bot['name']} nelegāls gājiens: {(r, c)}"
+            return finish(opponent_bot["id"], f"{current_bot['name']} nelegāls gājiens: {(r, c)}")
 
         board[r][c] = symbol
         total_moves = placed_count + step + 1
@@ -202,9 +213,9 @@ def play_match(p1: dict, p2: dict, on_board=None) -> tuple[str, str]:
             on_board(copy.deepcopy(board))
 
         if check_winner(board, r, c, symbol):
-            return current_bot["id"], f"5 rindā ({symbol}, {total_moves}. gājienā)"
+            return finish(current_bot["id"], f"5 rindā ({symbol}, {total_moves}. gājienā)")
 
-    return "DRAW", "Laukums pilns (neizšķirts)"
+    return finish("DRAW", "Laukums pilns (neizšķirts)")
 
 
 def print_standings(stats: dict, title: str = "PAŠREIZĒJĀ TABULA"):
