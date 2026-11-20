@@ -2,6 +2,7 @@ import copy
 import glob
 import importlib.util
 import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -13,8 +14,7 @@ from tkinter import ttk
 BOARD_SIZE = 15
 WIN_LEN = 5
 MOVE_TIMEOUT = 1.0  # Sekundes vienam gājienam / Swap2 lēmumam
-BOTS_PATTERN = "tic-tac-toe/*/bot.py"
-STUDENT_BOTS_PATTERN = "studenti/*/bot.py"
+BOTS_PATTERNS = ("tic-tac-toe/*/bot.py", "studenti/*/bot.py")
 
 
 def create_board() -> list[list[str]]:
@@ -47,7 +47,7 @@ def check_winner(board: list[list[str]], last_r: int, last_c: int, player: str) 
 
 
 def load_bots(pattern: str) -> list[dict]:
-    """Noskenē tic-tac-toe/<studenta_vards>/bot.py un ielādē derīgos botus."""
+    """Noskenē norādīto ceļu un ielādē derīgos botus."""
     bots = []
     required_funcs = ["get_move", "swap2_propose", "swap2_respond", "swap2_final_choice"]
 
@@ -78,12 +78,25 @@ def load_bots(pattern: str) -> list[dict]:
     return bots
 
 
+def load_all_bots() -> list[dict]:
+    """Apvieno botus no visām konfigurētajām mapēm bez dublikātiem."""
+    bots_by_id = {}
+    for pattern in BOTS_PATTERNS:
+        for bot in load_bots(pattern):
+            bots_by_id[bot["id"]] = bot
+    return list(bots_by_id.values())
+
+
 def run_with_timeout(func, *args):
-    """Izsauc bota funkciju ar dziļajām argumentu kopijām un laika limitu."""
+    """Izsauc bota funkciju ar dziļajām argumentu kopijām un nebloķējošu taimautu."""
     safe_args = [copy.deepcopy(a) for a in args]
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *safe_args)
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *safe_args)
+    try:
         return future.result(timeout=MOVE_TIMEOUT)
+    finally:
+        # wait=False nodrošina, ka bezgalīgs cikls studenta kodā neuzkar turnīru
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def validate_moves_list(board: list[list[str]], moves, expected_symbols: list[str]) -> bool:
@@ -130,7 +143,7 @@ def play_match(p1: dict, p2: dict, on_board=None, on_assignment=None, on_timing=
         board[r][c] = sym
         swap_cells.add((r, c))
     if on_board:
-        on_board(copy.deepcopy(board), swap_cells, returned_cells)
+        on_board(copy.deepcopy(board), set(swap_cells), set(returned_cells))
 
     # === 2. SOLIS: Swap2 — 2. spēlētājs izvēlas darbību ===
     try:
@@ -160,7 +173,7 @@ def play_match(p1: dict, p2: dict, on_board=None, on_assignment=None, on_timing=
             swap_cells.add((r, c))
             returned_cells.add((r, c))
         if on_board:
-            on_board(copy.deepcopy(board), swap_cells, returned_cells)
+            on_board(copy.deepcopy(board), set(swap_cells), set(returned_cells))
 
         # === 3. SOLIS: 1. spēlētājs izvēlas galīgo krāsu ===
         try:
@@ -182,7 +195,7 @@ def play_match(p1: dict, p2: dict, on_board=None, on_assignment=None, on_timing=
     if on_assignment:
         on_assignment(bot_x, bot_o)
 
-    # === 4. SOLIS: Pamatspēli sāk 'O' (4. vai 6. gājiens). ===
+    # === 4. SOLIS: Pamatspēli sāk 'O' (4. vai 6. gājiens) ===
     placed_count = sum(cell != "_" for row in board for cell in row)
     turn_order = [("O", bot_o), ("X", bot_x)]
 
@@ -217,7 +230,7 @@ def play_match(p1: dict, p2: dict, on_board=None, on_assignment=None, on_timing=
         board[r][c] = symbol
         total_moves = placed_count + step + 1
         if on_board:
-            on_board(copy.deepcopy(board), swap_cells, returned_cells)
+            on_board(copy.deepcopy(board), set(swap_cells), set(returned_cells))
 
         if check_winner(board, r, c, symbol):
             return current_bot["id"], f"5 rindā ({symbol}, {total_moves}. gājienā)"
@@ -239,13 +252,8 @@ def print_standings(stats: dict, title: str = "PAŠREIZĒJĀ TABULA"):
     print("-" * 74 + "\n")
 
 
-def run_tournament():
-    bots_by_id = {
-        bot["id"]: bot
-        for pattern in (BOTS_PATTERN, STUDENT_BOTS_PATTERN)
-        for bot in load_bots(pattern)
-    }
-    bots = list(bots_by_id.values())
+def run_tournament_cli(games_per_pair: int = 2):
+    bots = load_all_bots()
     n = len(bots)
 
     if n < 2:
@@ -253,7 +261,7 @@ def run_tournament():
         return
 
     print("=" * 74)
-    print(f"ATRASKTI {n} DALĪBNIEKI:")
+    print(f"ATRASTI {n} DALĪBNIEKI:")
     for b in bots:
         print(f"  • {b['id']} -> {b['name']}")
     print("=" * 74)
@@ -270,45 +278,41 @@ def run_tournament():
         for b in bots
     }
 
-    # Katrs ar katru izspēlē 2 spēles (mainoties lomām: P1 un P2 Swap2 atklātnē)
-    total_matches = n * (n - 1)
+    total_matches = (n * (n - 1) // 2) * games_per_pair
     match_num = 0
 
     for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
+        for j in range(i + 1, n):
+            for game in range(games_per_pair):
+                match_num += 1
+                p1 = bots[i] if game % 2 == 0 else bots[j]
+                p2 = bots[j] if game % 2 == 0 else bots[i]
 
-            match_num += 1
-            p1 = bots[i]
-            p2 = bots[j]
+                print(f"[{match_num}/{total_matches}] Spēlē: {p1['name']} (P1) vs {p2['name']} (P2) ... ", end="", flush=True)
+                t_start = time.perf_counter()
+                winner_id, reason = play_match(p1, p2)
+                elapsed = time.perf_counter() - t_start
 
-            print(f"[{match_num}/{total_matches}] Spēlē: {p1['name']} (P1) vs {p2['name']} (P2) ... ", end="", flush=True)
-            t_start = time.time()
-            winner_id, reason = play_match(p1, p2)
-            elapsed = time.time() - t_start
+                if winner_id == "DRAW":
+                    print(f"NEIZŠĶIRTS ({elapsed:.1f}s) — {reason}")
+                    stats[p1["id"]]["pts"] += 0.5
+                    stats[p2["id"]]["pts"] += 0.5
+                    stats[p1["id"]]["d"] += 1
+                    stats[p2["id"]]["d"] += 1
+                else:
+                    loser_id = p2["id"] if winner_id == p1["id"] else p1["id"]
+                    winner_name = stats[winner_id]["label"]
+                    print(f"UZVARA: {winner_name} ({elapsed:.1f}s) — {reason}")
 
-            if winner_id == "DRAW":
-                print(f"NEIZŠĶIRTS ({elapsed:.1f}s) — {reason}")
-                stats[p1["id"]]["pts"] += 0.5
-                stats[p2["id"]]["pts"] += 0.5
-                stats[p1["id"]]["d"] += 1
-                stats[p2["id"]]["d"] += 1
-            else:
-                loser_id = p2["id"] if winner_id == p1["id"] else p1["id"]
-                winner_name = stats[winner_id]["label"]
-                print(f"UZVARA: {winner_name} ({elapsed:.1f}s) — {reason}")
+                    stats[winner_id]["pts"] += 1.0
+                    stats[winner_id]["w"] += 1
+                    stats[loser_id]["l"] += 1
 
-                stats[winner_id]["pts"] += 1.0
-                stats[winner_id]["w"] += 1
-                stats[loser_id]["l"] += 1
+                    if "5 rindā" not in reason:
+                        stats[loser_id]["err"] += 1
 
-                if "5 rindā" not in reason:
-                    stats[loser_id]["err"] += 1
-
-            # Parāda aktuālo līderu tabulu pēc katras partijas
-            print_standings(stats, title=f"STĀVOKLIS PĒC {match_num}. PARTIJAS")
-            time.sleep(0.4)  # Neliela pauze, lai ekrānā var izsekot gaitai
+                print_standings(stats, title=f"STĀVOKLIS PĒC {match_num}. PARTIJAS")
+                time.sleep(0.3)
 
     print_standings(stats, title="TURNĪRA GALA REZULTĀTI")
 
@@ -320,14 +324,15 @@ class TournamentGUI:
         self.root.geometry("1280x760")
         self.root.configure(bg="#eef1f5")
 
-        self.bots = load_bots(BOTS_PATTERN)
+        self.bots = load_all_bots()
+        self.active_bots = []
         self.running = False
         self.stats = {}
         self.archive = []
         self.recent_boards = []
-        self.recent_results = []
         self.current_board = create_board()
         self.timing = {}
+        self._board_lock = threading.Lock()
 
         self._build_layout()
 
@@ -368,7 +373,7 @@ class TournamentGUI:
         body = tk.Frame(self.root, bg="#eef1f5")
         body.pack(fill="both", expand=True, padx=10)
 
-        left = tk.Frame(body, bg="white", width=220)
+        left = tk.Frame(body, bg="white", width=230)
         left.pack(side="left", fill="y", padx=(0, 8))
         tk.Label(left, text="Dalībnieki", font=("Segoe UI", 12, "bold"),
                  bg="white").pack(anchor="w", padx=10, pady=(8, 4))
@@ -397,7 +402,7 @@ class TournamentGUI:
                                       bg="#d9aa63", highlightthickness=1,
                                       highlightbackground="#7b5a32")
         self.board_canvas.pack()
-        self.draw_board(create_board())
+        self._draw_grid_once()
 
         right = tk.Frame(body, bg="white", width=330)
         right.pack(side="right", fill="y")
@@ -450,20 +455,26 @@ class TournamentGUI:
             self.root.after_cancel(self._resize_job)
         self._resize_job = self.root.after(150, self.draw_recent)
 
+    def _draw_grid_once(self):
+        canvas = self.board_canvas
+        canvas.delete("grid")
+        size = 510
+        margin = 15
+        cell = (size - 2 * margin) / BOARD_SIZE
+        for i in range(BOARD_SIZE + 1):
+            pos = margin + i * cell
+            canvas.create_line(pos, margin, pos, size - margin, fill="#8d663b", tags="grid")
+            canvas.create_line(margin, pos, size - margin, pos, fill="#8d663b", tags="grid")
+
     def draw_board(self, board, special_cells=None, returned_cells=None):
         canvas = self.board_canvas
-        canvas.delete("all")
+        canvas.delete("pieces")
         size = 510
         margin = 15
         cell = (size - 2 * margin) / BOARD_SIZE
 
         special_cells = special_cells or set()
         returned_cells = returned_cells or set()
-
-        for i in range(BOARD_SIZE + 1):
-            pos = margin + i * cell
-            canvas.create_line(pos, margin, pos, size - margin, fill="#8d663b")
-            canvas.create_line(margin, pos, size - margin, pos, fill="#8d663b")
 
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
@@ -475,6 +486,7 @@ class TournamentGUI:
                         left, top, left + cell, top + cell,
                         fill=fill,
                         outline="#8d663b",
+                        tags="pieces",
                     )
                 value = board[r][c]
                 if value == "_":
@@ -483,8 +495,11 @@ class TournamentGUI:
                 cy = margin + (r + 0.5) * cell
                 color = "#b51f1f" if value == "X" else "#1f5fb5"
                 font_size = max(7, int(cell * 0.58))
-                canvas.create_text(cx, cy, text=value, fill=color,
-                                   font=("Segoe UI", font_size, "bold"))
+                canvas.create_text(
+                    cx, cy, text=value, fill=color,
+                    font=("Segoe UI", font_size, "bold"),
+                    tags="pieces",
+                )
 
     def draw_recent(self):
         for widget in self.recent_frame.winfo_children():
@@ -544,6 +559,7 @@ class TournamentGUI:
                 bg="white",
                 font=("Segoe UI", 8),
             ).pack(pady=(2, 0))
+
     def start(self):
         if self.running:
             return
@@ -561,10 +577,10 @@ class TournamentGUI:
         for item in self.archive_table.get_children():
             self.archive_table.delete(item)
         self.recent_boards.clear()
-        self.recent_results.clear()
         self.draw_recent()
         self.stats = {
             bot["id"]: {
+                "id": bot["id"],
                 "label": f"{bot['name']} ({bot['id']})",
                 "pts": 0.0, "w": 0, "d": 0, "l": 0, "err": 0
             }
@@ -582,21 +598,21 @@ class TournamentGUI:
         self.status_var.set("Turnīra apturēšana...")
 
     def board_callback(self, board, swap_cells=None, returned_cells=None):
-        self.current_board = copy.deepcopy(board)
-        special_cells = set(swap_cells or ())
-        returned = set(returned_cells or ())
+        with self._board_lock:
+            self.current_board = board
         self.root.after(
             0,
-            lambda: self.draw_board(board, special_cells, returned),
+            lambda b=board, sc=swap_cells, rc=returned_cells: self.draw_board(b, sc, rc),
         )
         delay = max(0.0, float(self.delay_var.get()))
-        time.sleep(delay)
+        if delay > 0:
+            time.sleep(delay)
 
     def assignment_callback(self, bot_x, bot_o):
         self.root.after(
             0,
-            lambda: self.status_var.set(
-                f"Spēlē: {bot_x['name']} (X) vs {bot_o['name']} (O)"
+            lambda bx=bot_x["name"], bo=bot_o["name"]: self.status_var.set(
+                f"Spēlē: {bx} (X) vs {bo} (O)"
             ),
         )
 
@@ -608,14 +624,13 @@ class TournamentGUI:
 
     def run_thread(self):
         bots = self.active_bots
+        n = len(bots)
         games_per_pair = max(1, int(self.games_var.get()))
-        total_matches = len(bots) * (len(bots) - 1) * games_per_pair
+        total_matches = (n * (n - 1) // 2) * games_per_pair
         match_num = 0
 
-        for i in range(len(bots)):
-            for j in range(len(bots)):
-                if i == j:
-                    continue
+        for i in range(n):
+            for j in range(i + 1, n):
                 for game in range(games_per_pair):
                     if not self.running:
                         self.root.after(0, lambda: self.status_var.set("Turnīrs apturēts"))
@@ -624,11 +639,16 @@ class TournamentGUI:
                     match_num += 1
                     p1 = bots[i] if game % 2 == 0 else bots[j]
                     p2 = bots[j] if game % 2 == 0 else bots[i]
-                    self.current_board = create_board()
-                    self.root.after(0, lambda: self.draw_board(create_board()))
-                    self.root.after(0, lambda p1=p1, p2=p2, n=match_num:
-                                    self.status_var.set(
-                                        f"{n}/{total_matches}: {p1['name']} vs {p2['name']}"))
+
+                    empty_board = create_board()
+                    with self._board_lock:
+                        self.current_board = empty_board
+                    self.root.after(0, lambda b=empty_board: self.draw_board(b))
+                    self.root.after(
+                        0,
+                        lambda p1_n=p1["name"], p2_n=p2["name"], idx=match_num:
+                        self.status_var.set(f"{idx}/{total_matches}: {p1_n} vs {p2_n}"),
+                    )
 
                     timing_before = {
                         bot_id: values.copy()
@@ -641,6 +661,9 @@ class TournamentGUI:
                         self.assignment_callback,
                         self.timing_callback,
                     )
+                    move_match = re.search(r"(\d+)\. gājienā", reason)
+                    move_text = move_match.group(1) if move_match else ""
+
                     if winner_id == "DRAW":
                         self.stats[p1["id"]]["pts"] += 0.5
                         self.stats[p2["id"]]["pts"] += 0.5
@@ -649,9 +672,6 @@ class TournamentGUI:
                         score = "1/2-1/2"
                         history_score = "½-½"
                         winner_name = "Neizšķirts"
-                        move_match = re.search(r"(\d+)\. gājienā", reason)
-                        end_info = f"; {move_match.group(1)}. gājiens" if move_match else ""
-                        move_text = move_match.group(1) if move_match else ""
                     else:
                         loser_id = p2["id"] if winner_id == p1["id"] else p1["id"]
                         self.stats[winner_id]["pts"] += 1.0
@@ -662,14 +682,13 @@ class TournamentGUI:
                         score = "1-0" if winner_id == p1["id"] else "0-1"
                         history_score = score
                         winner_name = p1["name"] if winner_id == p1["id"] else p2["name"]
-                        move_match = re.search(r"(\d+)\. gājienā", reason)
-                        end_info = f"; {move_match.group(1)}. gājiens" if move_match else ""
-                        move_text = move_match.group(1) if move_match else ""
 
                     self.archive.append(
                         (match_num, p1["name"], p2["name"], score, move_text)
                     )
-                    final_board = copy.deepcopy(self.current_board)
+                    with self._board_lock:
+                        final_board = copy.deepcopy(self.current_board)
+
                     p1_match_total = (
                         self.timing[p1["id"]]["total"]
                         - timing_before[p1["id"]]["total"]
@@ -684,14 +703,8 @@ class TournamentGUI:
                             f"{match_num}. {p1['name']} – {p2['name']}",
                             history_score,
                             winner_name,
-                            {
-                                "name": p1["name"],
-                                "total": p1_match_total,
-                            },
-                            {
-                                "name": p2["name"],
-                                "total": p2_match_total,
-                            },
+                            {"name": p1["name"], "total": p1_match_total},
+                            {"name": p2["name"], "total": p2_match_total},
                         )
                     )
                     self.root.after(
@@ -716,7 +729,9 @@ class TournamentGUI:
                     self.root.after(0, self.refresh_standings)
                     self.root.after(0, self.draw_recent)
                     if self.running:
-                        time.sleep(max(0.0, float(self.match_delay_var.get())))
+                        match_delay = max(0.0, float(self.match_delay_var.get()))
+                        if match_delay > 0:
+                            time.sleep(match_delay)
 
         self.running = False
         self.root.after(0, lambda: self.status_var.set("Turnīrs pabeigts"))
@@ -725,17 +740,14 @@ class TournamentGUI:
     def refresh_standings(self):
         for item in self.standings.get_children():
             self.standings.delete(item)
-        ranking = sorted(self.stats.values(),
-                         key=lambda x: (x["pts"], x["w"], -x["err"]),
-                         reverse=True)
+        ranking = sorted(
+            self.stats.values(),
+            key=lambda x: (x["pts"], x["w"], -x["err"]),
+            reverse=True,
+        )
         for place, row in enumerate(ranking, start=1):
             games = row["w"] + row["d"] + row["l"]
-            bot_id = next(
-                bot_id
-                for bot_id, stats in self.stats.items()
-                if stats is row
-            )
-            timing = self.timing[bot_id]
+            timing = self.timing[row["id"]]
             time_text = f"{timing['total']:.2f}s"
             self.standings.insert("", "end", values=(
                 place, row["label"], f"{row['pts']:.1f}",
@@ -744,6 +756,9 @@ class TournamentGUI:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = TournamentGUI(root)
-    root.mainloop()
+    if "--cli" in sys.argv:
+        run_tournament_cli()
+    else:
+        root = tk.Tk()
+        app = TournamentGUI(root)
+        root.mainloop()

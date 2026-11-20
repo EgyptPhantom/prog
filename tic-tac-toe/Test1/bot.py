@@ -268,3 +268,301 @@ class _BoardState:
             v += 70_000
 
         return v + 14 - abs(r - 7) - abs(c - 7)
+
+    def candidates(self, k: int, limit: int) -> list[tuple[int, int]]:
+        scored = []
+        for r in range(N):
+            row = self.cells[r]
+            nr = self.near[r]
+            for c in range(N):
+                if row[c] == EMPTY and nr[c]:
+                    scored.append((self.move_value(r, c, k), r, c))
+        scored.sort(reverse=True)
+        return [(r, c) for _, r, c in scored[:limit]]
+
+    def order(self, cells, k: int) -> list[tuple[int, int]]:
+        scored = [
+            (self.move_value(r, c, k), r, c)
+            for r, c in cells
+            if self.cells[r][c] == EMPTY
+        ]
+        scored.sort(reverse=True)
+        return [(r, c) for _, r, c in scored]
+
+
+class _Timeout(Exception):
+    pass
+
+
+class _Engine:
+    def __init__(self, state: _BoardState, deadline: float):
+        self.g = state
+        self.deadline = deadline
+        self.nodes = 0
+        self.tt = {}  # (hash, turn_bit) -> (depth, flag, score, best_move)
+        self.partial_move = None
+
+    def _tactical_filter(self, p: str):
+        g = self.g
+        k = PIDX[p]
+        wins_p, strong_p, forks_p, fours_p, _ = g.threats(k)
+        if wins_p:
+            return WIN, [next(iter(wins_p))]
+
+        wins_o, strong_o, forks_o, fours_o, threes_o = g.threats(1 - k)
+        if len(wins_o) >= 2:
+            return -(WIN - 1), [next(iter(wins_o))]
+        if wins_o:
+            return None, [next(iter(wins_o))]  # Obligāts vienīgais bloks
+
+        # Droša uzvara ar OPEN4 / 4x3 (pretiniekam nav FIVE, jo tikko pārbaudījām wins_o)
+        if strong_p:
+            return WIN - 2, g.order(strong_p, k)
+
+        # Ja pretiniekam ir OPEN4 vai 4x3 drauds, varam glābties tikai ar saviem FOUR vai bloķējot
+        if strong_o:
+            pool = strong_o | fours_p | fours_o
+            return None, g.order(pool, k)
+
+        # Ja pašam ir 3x3 dakša un pretiniekam nav tūlītēju četrinieku
+        if forks_p and not fours_o:
+            return None, g.order(forks_p | fours_p, k)
+
+        # Pretinieka 3x3 dakša vai OPEN3 — apskatām blokus, pretinieka četrinieku punktus un savus četriniekus
+        if forks_o or threes_o:
+            pool = forks_o | threes_o | fours_o | fours_p
+            return None, g.order(pool, k)
+
+        return None, None
+
+    def negamax(self, p: str, depth: int, alpha: int, beta: int, ply: int) -> int:
+        self.nodes += 1
+        if (self.nodes & 31) == 0 and time.perf_counter() > self.deadline:
+            raise _Timeout
+
+        g = self.g
+        k = PIDX[p]
+        tt_key = (g.hash, k)
+        orig_alpha = alpha
+
+        entry = self.tt.get(tt_key)
+        tt_move = None
+        if entry is not None:
+            e_depth, e_flag, e_score, tt_move = entry
+            if e_depth >= depth:
+                if e_flag == TT_EXACT:
+                    return e_score
+                elif e_flag == TT_ALPHA and e_score <= alpha:
+                    return e_score
+                elif e_flag == TT_BETA and e_score >= beta:
+                    return e_score
+
+        result, moves = self._tactical_filter(p)
+        if result is not None:
+            return result - ply if result > 0 else result + ply
+
+        forced = moves is not None and len(moves) == 1
+        if not forced:
+            if depth <= 0 or ply >= MAX_PLY:
+                return g.evaluate(k)
+            if moves is None:
+                moves = g.candidates(k, BEAM)
+
+        if not moves:
+            return 0
+
+        # Ieliekam transpozīciju tabulas labāko gājienu saraksta pašā sākumā
+        if tt_move is not None and tt_move in moves:
+            moves.remove(tt_move)
+            moves.insert(0, tt_move)
+
+        next_depth = depth if forced else depth - 1
+        opp = OTHER[p]
+        best_val = -INF
+        best_mv = moves[0]
+
+        for idx, (r, c) in enumerate(moves):
+            g.place(r, c, p)
+            # Principal Variation Search (PVS) paātrina Alpha-Beta par ~25%
+            if idx == 0:
+                val = -self.negamax(opp, next_depth, -beta, -alpha, ply + 1)
+            else:
+                val = -self.negamax(opp, next_depth, -alpha - 1, -alpha, ply + 1)
+                if alpha < val < beta:
+                    val = -self.negamax(opp, next_depth, -beta, -alpha, ply + 1)
+            g.undo(r, c, p)
+
+            if val > best_val:
+                best_val = val
+                best_mv = (r, c)
+                if val > alpha:
+                    alpha = val
+                    if alpha >= beta:
+                        break
+
+        if len(self.tt) < 300_000:
+            if best_val <= orig_alpha:
+                flag = TT_ALPHA
+            elif best_val >= beta:
+                flag = TT_BETA
+            else:
+                flag = TT_EXACT
+            self.tt[tt_key] = (depth, flag, best_val, best_mv)
+
+        return best_val
+
+    def search_root(self, moves: list[tuple[int, int]], p: str, depth: int):
+        alpha = -INF
+        best_val = -INF
+        best_mv = moves[0]
+        self.partial_move = None
+        opp = OTHER[p]
+
+        for r, c in moves:
+            self.g.place(r, c, p)
+            val = -self.negamax(opp, depth - 1, -INF, -alpha, 1)
+            self.g.undo(r, c, p)
+
+            if val > best_val:
+                best_val = val
+                best_mv = (r, c)
+                self.partial_move = best_mv
+            if val > alpha:
+                alpha = val
+
+        return best_val, best_mv
+
+
+def _fallback_empty(board) -> tuple[int, int]:
+    for r in range(N):
+        for c in range(N):
+            if board[r][c] == EMPTY:
+                return (r, c)
+    return (7, 7)
+
+
+def _solve(board, player: str, budget: float):
+    deadline = time.perf_counter() + budget
+    g = _BoardState(board)
+    if g.stones == 0:
+        return (7, 7), 0
+
+    k = PIDX[player]
+    engine = _Engine(g, deadline)
+    result, moves = engine._tactical_filter(player)
+    if result is not None or (moves is not None and len(moves) == 1):
+        return moves[0], (result if result is not None else g.evaluate(k))
+
+    if moves is None:
+        moves = g.candidates(k, ROOT_BEAM)
+    if not moves:
+        return _fallback_empty(board), 0
+
+    best_mv = moves[0]
+    best_val = g.evaluate(k)
+
+    for depth in range(1, 22):
+        try:
+            val, mv = engine.search_root(moves, player, depth)
+        except _Timeout:
+            if engine.partial_move is not None:
+                best_mv = engine.partial_move
+            break
+
+        best_mv, best_val = mv, val
+        moves.remove(mv)
+        moves.insert(0, mv)
+        if abs(val) >= WIN - 100:
+            break
+
+    return best_mv, best_val
+
+
+def get_move(board: list[list[str]], player: str) -> tuple[int, int]:
+    try:
+        move, _ = _solve(board, player, TIME_LIMIT)
+        r, c = move
+        if 0 <= r < N and 0 <= c < N and board[r][c] == EMPTY:
+            return (r, c)
+    except Exception:
+        pass
+    return _fallback_empty(board)
+
+
+SWAP2_OPENINGS = (
+    # 1. Klasiskā neitrālā diagonāle (Soosyrv-8 sākums)
+    [(7, 7, X), (6, 8, O), (8, 9, X)],
+    # 2. Asimetriskais trijstūris (Taraguchi tipa sākums)
+    [(7, 7, X), (7, 8, O), (9, 6, X)],
+    # 3. Plašā centra kontrole (grūti izveidot tūlītēju 3x3 dakšu)
+    [(7, 7, X), (6, 6, O), (8, 9, X)],
+    # 4. Zirga gājiena nobīde (klasisks līdzsvarots Renju/Swap2 variants)
+    [(7, 7, X), (8, 6, O), (6, 9, X)],
+    # 5. Pretdiagonāles balanss
+    [(7, 7, X), (6, 7, O), (8, 9, X)],
+)
+
+
+def swap2_propose(board: list[list[str]]) -> list[tuple[int, int, str]]:
+    # Izvēlamies vienu no 5 līdzsvarotajām atklātnēm un gadījuma pagriezienu/atspoguļojumu
+    opening = random.choice(SWAP2_OPENINGS)
+    flip_r = random.choice((False, True))
+    flip_c = random.choice((False, True))
+    swap_axes = random.choice((False, True))
+
+    result = []
+    for r, c, sym in opening:
+        rr = (N - 1 - r) if flip_r else r
+        cc = (N - 1 - c) if flip_c else c
+        if swap_axes:
+            rr, cc = cc, rr
+        result.append((rr, cc, sym))
+    return result
+
+
+def swap2_respond(board: list[list[str]]) -> dict:
+    # Novērtējam pozīciju no 'O' skatpunkta (jo 'O' veic 4. gājienu)
+    _, val_o = _solve(board, O, TIME_LIMIT * 0.65)
+    if val_o > 120:
+        return {"action": "TAKE_O"}
+    if val_o < -120:
+        return {"action": "TAKE_X"}
+
+    # Ja pozīcija ir tuvu neitrālai, meklējam labāko PLACE_TWO balansu
+    g = _BoardState(board)
+    cands = g.candidates(PIDX[O], 8)
+    best_pair = None
+    best_margin = abs(val_o)
+
+    for i in range(min(len(cands), 5)):
+        r1, c1 = cands[i]
+        g.place(r1, c1, X)
+        for j in range(min(len(cands), 5)):
+            if i == j:
+                continue
+            r2, c2 = cands[j]
+            g.place(r2, c2, O)
+            margin = abs(g.evaluate(PIDX[O]))
+            if margin < best_margin:
+                best_margin = margin
+                best_pair = [(r1, c1, X), (r2, c2, O)]
+            g.undo(r2, c2, O)
+        g.undo(r1, c1, X)
+
+    if best_pair is not None:
+        return {"action": "PLACE_TWO", "moves": best_pair}
+
+    return {"action": "TAKE_O"} if val_o >= 0 else {"action": "TAKE_X"}
+
+
+def swap2_final_choice(board: list[list[str]]) -> str:
+    _, val_o = _solve(board, O, TIME_LIMIT * 0.75)
+    return O if val_o >= 0 else X
+
+
+if __name__ == "__main__":
+    test_board = [[EMPTY] * N for _ in range(N)]
+    for r, c, sym in swap2_propose(test_board):
+        test_board[r][c] = sym
+    t0 = time.perf_counter()
+    print(BOT_NAME, "->", get_move(test_board, O), f"({time.perf_counter() - t0:.2f} s)")
