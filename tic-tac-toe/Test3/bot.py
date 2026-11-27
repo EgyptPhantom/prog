@@ -1,7 +1,7 @@
 import random
 import time
 
-BOT_NAME = "BossAI (Iterative Negamax)"
+BOT_NAME = "Iterative Negamax"
 BOARD_SIZE = 15
 WIN_LENGTH = 5
 EMPTY = "_"

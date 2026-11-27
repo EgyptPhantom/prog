@@ -3,7 +3,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 from game_engine import BOARD_SIZE, Match
-from main import load_bots
+from tournament import load_bots
 
 
 COLORS = {

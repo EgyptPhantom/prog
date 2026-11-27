@@ -1,4 +1,4 @@
-BOT_NAME = "GreedyAI 2"
+BOT_NAME = "Mantkārīgais AI"
 
 BOARD_SIZE = 15
 
