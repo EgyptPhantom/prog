@@ -7,6 +7,7 @@
 | Students | Blackjack | Labirinti | Piecu rindā |
 |---|:---:|:---:|:---:|
 | Enrijs | - | X | - |
+| Ervīns | X | - | - |
 | Gundars Vaivads | - | X | X |
 | Kristers Kalniņš | - | X | X |
 | Martins | - | X | - |
@@ -19,3 +20,5 @@
 `life/` un `#materiali/` satur darbus, kuriem mapēs nav norādīts konkrēts autors. Labirintu mapē `Nezinams` ir arī neidentificēta autora darbs. Testa boti un `Test1`–`Test4` nav uzskaitīti kā studenti.
 
 **Piezīme:** pārskats veidots pēc repozitorijā esošajām mapēm. Bez pilna studentu saraksta nav iespējams noteikt, vai ir arī studenti, kuru darbiem šeit nav mapes.
+
+Pēdējo reizi atjaunināts: **2026-11-27 11:50 (+02:00)**.
